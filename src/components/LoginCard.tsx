@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,16 +11,29 @@ import {
 } from "@/components/ui/select";
 import { Eye, EyeOff, Lock } from "lucide-react";
 import { SopraLogo } from "@/components/SopraLogo";
+import { useAuth } from "@/contexts/AuthContext";
+import { toast } from "@/hooks/use-toast";
 
 export const LoginCard = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [language, setLanguage] = useState("fr");
+  const { login } = useAuth();
+  const navigate = useNavigate();
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    // Handle login
+    const success = login(identifier, password);
+    if (success) {
+      navigate("/dashboard");
+    } else {
+      toast({
+        title: "Erreur de connexion",
+        description: "Identifiant ou mot de passe incorrect.",
+        variant: "destructive",
+      });
+    }
   };
 
   return (
