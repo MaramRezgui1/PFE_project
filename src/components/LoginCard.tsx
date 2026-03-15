@@ -50,7 +50,7 @@ export const LoginCard = () => {
             4YOU
           </div>
           <p className="text-lg text-card-foreground">
-            <span className="font-semibold">Bienvenue sur 4YOU,</span>{" "}
+            <span className="font-semibold">Bienvenue Sahar sur 4YOU,</span>{" "}
             connectez-vous pour accéder à votre espace.
           </p>
         </div>
