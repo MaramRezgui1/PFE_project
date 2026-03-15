@@ -5,15 +5,18 @@ services:
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/credentials/gcp-key.json
       - GOOGLE_PROJECT_ID=sahar-pfe
-      - MONITORING_METRICS_TYPE_PREFIXES=run.googleapis.com
     volumes:
       - ./gcp-key.json:/credentials/gcp-key.json:ro
     ports:
       - "9255:9255"
+    command:
+      - "--google.project-id=sahar-pfe"
+      - "--monitoring.metrics-type-prefixes=run.googleapis.com"
     restart: unless-stopped
 
   prometheus:
     image: prom/prometheus:latest
+    user: root
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
