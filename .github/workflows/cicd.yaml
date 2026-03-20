@@ -32,7 +32,9 @@ jobs:
         run: npm test -- --coverage
 
       - name: Security scan
-        run: npm audit --audit-level=high
+        run: |
+          npm audit fix
+          npm audit --audit-level=high
 
   # ─── 2. DOCKER BUILD & PUSH ────────────────────────────────
   docker:
