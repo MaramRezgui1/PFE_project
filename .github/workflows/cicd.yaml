@@ -33,7 +33,7 @@ jobs:
 
       - name: Security scan
         run: |
-          npm audit fix
+          npm audit fix || true
           npm audit --audit-level=high
 
   # ─── 2. DOCKER BUILD & PUSH ────────────────────────────────
@@ -44,7 +44,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-
     steps:
       - uses: actions/checkout@v4
 
