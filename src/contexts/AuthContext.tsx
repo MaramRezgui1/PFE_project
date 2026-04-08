@@ -6,10 +6,24 @@ interface User {
   folderCount: number;
 }
 
-const USERS: Record<string, { password: string; user: User }> = {
-  TNEEIN01: { password: "4YOU", user: { id: "TNEEIN01", name: "TNEEIN01 TEST1", folderCount: 9 } },
-  TNEEMA01: { password: "4YOU", user: { id: "TNEEMA01", name: "TNEEMA01 TEST2", folderCount: 5 } },
+type MockUserEntry = { id: string; password: string; name: string; folderCount: number };
+
+const buildUsersMap = (): Record<string, { password: string; user: User }> => {
+  const raw = import.meta.env.VITE_MOCK_USERS;
+  if (!raw) {
+    console.warn("VITE_MOCK_USERS is not defined. Copy .env.example to .env.local and fill in the values.");
+    return {};
+  }
+  const entries: MockUserEntry[] = JSON.parse(raw);
+  return Object.fromEntries(
+    entries.map(({ id, password, name, folderCount }) => [
+      id.toUpperCase(),
+      { password, user: { id, name, folderCount } },
+    ])
+  );
 };
+
+const USERS = buildUsersMap();
 
 interface AuthContextType {
   user: User | null;
