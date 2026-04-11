@@ -68,6 +68,11 @@ data:
             action: replace
             target_label: kubernetes_pod_name
 
+      # Métriques kube-state-metrics
+      - job_name: 'kube-state-metrics'
+        static_configs:
+          - targets: ['kube-state-metrics.monitoring.svc.cluster.local:8080']
+
       # Métriques de l'application login-page (sopra-hr)
       - job_name: 'login-page'
         static_configs:
