@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: login-page
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/MaramRezgui1/PFE_project
+    targetRevision: main
+    path: terraform
+    directory:
+      include: 'k8s-deployment.yaml'
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: sopra-hr
+
+  syncPolicy:
+    automated:
+      prune: true       # Remove resources deleted from Git
+      selfHeal: true    # Re-sync if cluster drifts from Git
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

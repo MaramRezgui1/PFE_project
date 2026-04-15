@@ -3,6 +3,301 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'terraform/k8s-deployment.yaml'  # Avoid re-triggering on ArgoCD manifest commits
+
+env:
+  PROJECT_ID: maram-pfe
+  REGION: europe-west9
+  REPOSITORY: sopra-repo
+  IMAGE: login-page
+  GKE_CLUSTER: maram-cluster-terraform
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Stage 1: Build the Docker image
+  # ──────────────────────────────────────────────
+  build:
+    name: 🔨 Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }} \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:latest \
+            .
+
+      - name: Save Docker image as artifact
+        run: |
+          docker save \
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }} \
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:latest \
+            -o image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
+          retention-days: 1
+
+  # ──────────────────────────────────────────────
+  # Stage 2: Trivy — Image Vulnerability Scan
+  # ──────────────────────────────────────────────
+  trivy-scan:
+    name: 🔍 Trivy Scan
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load -i image.tar
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Run Trivy (SARIF report)
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Download Trivy HTML template
+        if: always()
+        run: |
+          mkdir -p .trivy-templates
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+            -o .trivy-templates/html.tpl
+
+      - name: Run Trivy (HTML report)
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+          format: template
+          template: '@.trivy-templates/html.tpl'
+          output: trivy-report.html
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Upload Trivy HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.html
+          retention-days: 14
+
+  # ──────────────────────────────────────────────
+  # Stage 3: Push image to Artifact Registry
+  # ──────────────────────────────────────────────
+  push:
+    name: 📦 Push to Artifact Registry
+    runs-on: ubuntu-latest
+    needs: trivy-scan
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load -i image.tar
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:latest
+
+  # ──────────────────────────────────────────────
+  # Stage 4: Update K8s Manifest (GitOps)
+  # ArgoCD watches this commit and deploys
+  # ──────────────────────────────────────────────
+  update-manifest:
+    name: ✏️ Update Manifest
+    runs-on: ubuntu-latest
+    needs: push
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update image tag in K8s manifest
+        run: |
+          sed -i "s|image: europe-west9-docker.pkg.dev/maram-pfe/sopra-repo/login-page:.*|image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}|" terraform/k8s-deployment.yaml
+
+      - name: Commit and push updated manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add terraform/k8s-deployment.yaml
+          git diff --staged --quiet || git commit -m "ci: update login-page image to ${{ env.IMAGE_TAG }}"
+          git push
+
+  # ──────────────────────────────────────────────
+  # Stage 5: ArgoCD Sync — Wait for deployment
+  # ──────────────────────────────────────────────
+  argocd-sync:
+    name: 🔄 ArgoCD Sync
+    runs-on: ubuntu-latest
+    needs: update-manifest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.REGION }}
+
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o /usr/local/bin/argocd \
+            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x /usr/local/bin/argocd
+
+      - name: Port-forward ArgoCD server
+        run: |
+          kubectl port-forward svc/argocd-server 8443:443 -n argocd &
+          sleep 5
+
+      - name: Login to ArgoCD
+        run: |
+          ARGOCD_PASSWORD=$(kubectl get secret argocd-initial-admin-secret \
+            -n argocd -o jsonpath="{.data.password}" | base64 -d)
+          argocd login localhost:8443 \
+            --username admin \
+            --password "$ARGOCD_PASSWORD" \
+            --insecure
+
+      - name: Trigger sync and wait for healthy deployment
+        run: |
+          argocd app sync login-page --force
+          argocd app wait login-page --sync --health --timeout 300
+
+  # ──────────────────────────────────────────────
+  # Stage 6: OWASP ZAP — DAST Scan
+  # ──────────────────────────────────────────────
+  zap-scan:
+    name: 🛡️ OWASP ZAP Scan
+    runs-on: ubuntu-latest
+    needs: argocd-sync
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.REGION }}
+
+      - name: Port-forward app
+        run: |
+          kubectl port-forward svc/login-page-service 8080:80 -n sopra-hr &
+          sleep 5
+          curl -s -o /dev/null -w "%{http_code}" http://localhost:8080 || true
+
+      - name: Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://localhost:8080
+          rules_file_name: .zap/rules.tsv
+          allow_issue_writing: false
+          fail_action: false
+
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: report_html.html
+          retention-days: 14
+
+
+on:
+  push:
+    branches: [main]
 
 env:
   PROJECT_ID: maram-pfe
