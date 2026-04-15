@@ -96,13 +96,20 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
+      - name: Download Trivy HTML template
+        if: always()
+        run: |
+          mkdir -p .trivy-templates
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+            -o .trivy-templates/html.tpl
+
       - name: Run Trivy (HTML report)
         if: always()
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
           format: template
-          template: '@/usr/local/share/trivy/templates/html.tpl'
+          template: '@.trivy-templates/html.tpl'
           output: trivy-report.html
           severity: CRITICAL,HIGH,MEDIUM
 
