@@ -23,3 +23,10 @@ spec:
       selfHeal: true    # Re-sync if cluster drifts from Git
     syncOptions:
       - CreateNamespace=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations
+        - /spec/template/spec/containers/0/image

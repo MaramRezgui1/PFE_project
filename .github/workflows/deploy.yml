@@ -242,7 +242,7 @@ jobs:
       - name: Trigger sync and wait for healthy deployment
         run: |
           argocd app sync login-page
-          argocd app wait login-page --sync --health --timeout 300
+          argocd app wait login-page --health --timeout 300
 
   # ──────────────────────────────────────────────
   # Stage 6: OWASP ZAP — DAST Scan
