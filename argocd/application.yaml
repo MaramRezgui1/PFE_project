@@ -23,4 +23,3 @@ spec:
       selfHeal: true    # Re-sync if cluster drifts from Git
     syncOptions:
       - CreateNamespace=true
-      - ServerSideApply=true

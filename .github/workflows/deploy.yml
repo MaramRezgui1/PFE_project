@@ -241,7 +241,7 @@ jobs:
 
       - name: Trigger sync and wait for healthy deployment
         run: |
-          argocd app sync login-page --force
+          argocd app sync login-page
           argocd app wait login-page --sync --health --timeout 300
 
   # ──────────────────────────────────────────────
