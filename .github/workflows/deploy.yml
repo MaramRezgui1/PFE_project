@@ -58,12 +58,57 @@ jobs:
           retention-days: 1
 
   # ──────────────────────────────────────────────
-  # Stage 2: Push image to Artifact Registry
+  # Stage 2: Trivy — Image Vulnerability Scan
+  # ──────────────────────────────────────────────
+  trivy-scan:
+    name: 🔍 Trivy Scan
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load -i image.tar
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Run Trivy (SARIF report)
+        if: always()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ──────────────────────────────────────────────
+  # Stage 3: Push image to Artifact Registry
   # ──────────────────────────────────────────────
   push:
     name: 📦 Push to Artifact Registry
     runs-on: ubuntu-latest
-    needs: build
+    needs: trivy-scan
     permissions:
       contents: read
       id-token: write
@@ -92,7 +137,7 @@ jobs:
           docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:latest
 
   # ──────────────────────────────────────────────
-  # Stage 3: Deploy to GKE
+  # Stage 4: Deploy to GKE
   # ──────────────────────────────────────────────
   deploy:
     name: 🚀 Deploy to GKE
@@ -125,3 +170,53 @@ jobs:
 
       - name: Verify deployment
         run: kubectl rollout status deployment/login-page -n sopra-hr --timeout=120s
+
+  # ──────────────────────────────────────────────
+  # Stage 5: OWASP ZAP — DAST Scan
+  # ──────────────────────────────────────────────
+  zap-scan:
+    name: 🛡️ OWASP ZAP Scan
+    runs-on: ubuntu-latest
+    needs: deploy
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.REGION }}
+
+      - name: Get app URL via port-forward
+        run: |
+          kubectl port-forward svc/login-page-service 8080:80 -n sopra-hr &
+          sleep 5
+          curl -s -o /dev/null -w "%{http_code}" http://localhost:8080 || true
+
+      - name: Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://localhost:8080
+          rules_file_name: .zap/rules.tsv
+          allow_issue_writing: false
+          fail_action: false
+
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: report_html.html
+          retention-days: 14
