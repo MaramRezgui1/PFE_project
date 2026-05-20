@@ -7,7 +7,7 @@ on:
       - 'terraform/k8s-deployment.yaml'  # Avoid re-triggering on ArgoCD manifest commits
 
 env:
-  PROJECT_ID: maram-pfe
+  PROJECT_ID: maram-pfe-495314
   REGION: europe-west9
   REPOSITORY: sopra-repo
   IMAGE: login-page
@@ -185,7 +185,7 @@ jobs:
 
       - name: Update image tag in K8s manifest
         run: |
-          sed -i "s|image: europe-west9-docker.pkg.dev/maram-pfe/sopra-repo/login-page:.*|image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}|" terraform/k8s-deployment.yaml
+          sed -i "s|image: .*login-page:.*|image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}|" terraform/k8s-deployment.yaml
 
       - name: Commit and push updated manifest
         run: |
