@@ -249,7 +249,7 @@ This Application CR tells Argo CD to:
 - Deploy to namespace: `sopra-hr`
 - Auto-sync with pruning and self-heal enabled
 
-### 6.6 Verifu
+### 6.6 Verifuy Argo CD sync status
 
 ```bash
 kubectl get applications -n argocd
