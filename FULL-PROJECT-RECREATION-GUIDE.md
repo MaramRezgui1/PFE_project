@@ -186,7 +186,7 @@ The manifest at `terraform/k8s-deployment.yaml` includes:
 kubectl apply -f terraform/k8s-deployment.yaml
 ```
 
-### 5.2 Verify deployment
+### 5.2 Verify deployment and get external IP
 
 ```bash
 kubectl get pods -n sopra-hr
