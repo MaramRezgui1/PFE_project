@@ -295,12 +295,104 @@ jobs:
           argocd app wait login-page --health --timeout 300
 
   # ──────────────────────────────────────────────
+  # Stage 5B: Build & Push Playwright Test Image
+  # ──────────────────────────────────────────────
+  build-playwright:
+    name: 🎭 Build Playwright Image
+    runs-on: ubuntu-latest
+    needs: push
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build Playwright Docker image
+        run: |
+          docker build \
+            -f Dockerfile.playwright \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/playwright-tests:${{ env.IMAGE_TAG }} \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/playwright-tests:latest \
+            .
+
+      - name: Push Playwright Docker image
+        run: |
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/playwright-tests:${{ env.IMAGE_TAG }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/playwright-tests:latest
+
+  # ──────────────────────────────────────────────
+  # Stage 5C: Run Playwright E2E Tests on GKE
+  # ──────────────────────────────────────────────
+  playwright-e2e:
+    name: 🎭 Playwright E2E Tests
+    runs-on: ubuntu-latest
+    needs: [argocd-sync, build-playwright]
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.REGION }}
+
+      - name: Delete previous Playwright job (if exists)
+        run: |
+          kubectl delete job playwright-e2e-tests -n sopra-hr --ignore-not-found=true
+
+      - name: Run Playwright tests as K8s Job
+        run: |
+          sed "s|playwright-tests:latest|playwright-tests:${{ env.IMAGE_TAG }}|g" \
+            k8s/playwright-job.yaml | kubectl apply -f -
+
+      - name: Wait for Playwright job to complete
+        run: |
+          kubectl wait --for=condition=complete job/playwright-e2e-tests \
+            -n sopra-hr --timeout=300s || true
+
+      - name: Get Playwright test logs
+        if: always()
+        run: |
+          kubectl logs job/playwright-e2e-tests -n sopra-hr
+
+      - name: Check job status
+        run: |
+          STATUS=$(kubectl get job playwright-e2e-tests -n sopra-hr -o jsonpath='{.status.succeeded}')
+          if [ "$STATUS" != "1" ]; then
+            echo "❌ Playwright E2E tests failed!"
+            exit 1
+          fi
+          echo "✅ Playwright E2E tests passed!"
+
+  # ──────────────────────────────────────────────
   # Stage 6: OWASP ZAP — DAST Scan
   # ──────────────────────────────────────────────
   zap-scan:
     name: 🛡️ OWASP ZAP Scan
     runs-on: ubuntu-latest
-    needs: argocd-sync
+    needs: [argocd-sync, playwright-e2e]
     permissions:
       contents: read
       id-token: write

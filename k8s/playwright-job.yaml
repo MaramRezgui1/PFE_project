@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: playwright-e2e-tests
+  namespace: sopra-hr
+  labels:
+    app: playwright-tests
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: playwright-tests
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: playwright
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:latest
+          env:
+            - name: BASE_URL
+              value: "http://login-page-service.sopra-hr.svc.cluster.local"
+            - name: CI
+              value: "true"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
