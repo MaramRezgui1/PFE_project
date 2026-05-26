@@ -3,12 +3,13 @@ import { test, expect } from '@playwright/test';
 test.describe('Login Page', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
+    // Wait for the React app to fully hydrate
+    await page.waitForLoadState('networkidle');
   });
 
   test('should display login form with all required fields', async ({ page }) => {
     // Verify the page title / logo area
-
-    await expect(page.locator('text=Bienvenue Maram sur 4YOU')).toBeVisible();
+    await expect(page.locator('text=Bienvenue Maram sur 4YOU')).toBeVisible({ timeout: 15000 });
 
     // Verify form fields are present
     await expect(page.locator('label:has-text("Votre identifiant")')).toBeVisible();
@@ -20,25 +21,27 @@ test.describe('Login Page', () => {
   });
 
   test('should login successfully with valid credentials', async ({ page }) => {
-    // Fill in valid credentials
-    const identifierInput = page.locator('label:has-text("Votre identifiant") + input, label:has-text("Votre identifiant") ~ input').first();
-    const passwordInput = page.locator('input[type="password"]');
+    // Wait for form to be interactive
+    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 15000 });
 
-    // Use the parent div structure to find inputs
+    // Fill in valid credentials
     await page.locator('label:has-text("Votre identifiant")').locator('..').locator('input').fill('TNEEIN01');
-    await passwordInput.fill('4YOU');
+    await page.locator('input[type="password"]').fill('4YOU');
 
     // Click submit
     await page.locator('button[type="submit"]:has-text("Me connecter")').click();
 
     // Should redirect to dashboard
-    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page).toHaveURL(/\/dashboard/, { timeout: 10000 });
 
     // Verify user info is displayed on dashboard
-    await expect(page.locator('text=TNEEIN01')).toBeVisible();
+    await expect(page.locator('text=TNEEIN01')).toBeVisible({ timeout: 10000 });
   });
 
   test('should show error toast on invalid credentials', async ({ page }) => {
+    // Wait for form to be interactive
+    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 15000 });
+
     // Fill in invalid credentials
     await page.locator('label:has-text("Votre identifiant")').locator('..').locator('input').fill('INVALID_USER');
     await page.locator('input[type="password"]').fill('wrong_password');
@@ -56,31 +59,33 @@ test.describe('Login Page', () => {
   test('should not display dashboard content without auth', async ({ page }) => {
     // Try to navigate directly to dashboard
     await page.goto('/dashboard');
+    await page.waitForLoadState('networkidle');
 
     // Wait for page to settle
     await page.waitForTimeout(2000);
 
     // The dashboard should NOT show any protected content (user info, etc.)
-    // Either it redirects to login or shows nothing
     const dashboardContent = page.locator('text=Mon solde de congés');
     await expect(dashboardContent).not.toBeVisible();
   });
 
   test('should logout successfully from dashboard', async ({ page }) => {
+    // Wait for form to be interactive
+    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 15000 });
+
     // First login
     await page.locator('label:has-text("Votre identifiant")').locator('..').locator('input').fill('TNEEIN01');
     await page.locator('input[type="password"]').fill('4YOU');
     await page.locator('button[type="submit"]:has-text("Me connecter")').click();
 
     // Wait for dashboard
-    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page).toHaveURL(/\/dashboard/, { timeout: 10000 });
 
     // Click logout button (Power icon button)
     await page.locator('header button').last().click();
 
     // Should redirect back to login
-    await expect(page).toHaveURL('/');
+    await expect(page).toHaveURL('/', { timeout: 10000 });
     await expect(page.locator('text=Bienvenue Maram sur 4YOU')).toBeVisible();
   });
 });
-

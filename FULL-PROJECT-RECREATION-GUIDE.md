@@ -16,11 +16,12 @@
 4. [Phase 3 — Connect to GKE Cluster](#4-phase-3--connect-to-gke-cluster)
 5. [Phase 4 — Deploy Application](#5-phase-4--deploy-application)
 6. [Phase 5 — Install Argo CD](#6-phase-5--install-argo-cd)
-7. [Phase 6 — Install Prometheus & Grafana (Optional)](#7-phase-6--install-prometheus--grafana-optional)
-8. [Phase 7 — Configure GitHub Actions CI/CD](#8-phase-7--configure-github-actions-cicd)
-9. [Phase 8 — Validation & Smoke Tests](#9-phase-8--validation--smoke-tests)
-10. [Improvements & Recommendations](#10-improvements--recommendations)
-11. [Troubleshooting](#11-troubleshooting)
+7. [Phase 6 — Playwright E2E Tests](#7-phase-6--playwright-e2e-tests)
+8. [Phase 7 — Install Prometheus & Grafana (Optional)](#8-phase-7--install-prometheus--grafana-optional)
+9. [Phase 8 — Configure GitHub Actions CI/CD](#9-phase-8--configure-github-actions-cicd)
+10. [Phase 9 — Validation & Smoke Tests](#10-phase-9--validation--smoke-tests)
+11. [Improvements & Recommendations](#11-improvements--recommendations)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -258,9 +259,109 @@ kubectl get applications -n argocd
 
 ---
 
-## 7. Phase 6 — Install Prometheus & Grafana (Optional)
+## 7. Phase 6 — Playwright E2E Tests
 
-### 7.1 Add Helm repo and install
+Playwright provides end-to-end browser testing against the deployed application. Tests run locally during development and as a **Kubernetes Job on GKE** in the CI/CD pipeline.
+
+### 7.1 Install Playwright locally
+
+```bash
+npm install -D @playwright/test
+npx playwright install --with-deps chromium
+```
+
+### 7.2 Project structure
+
+| File | Purpose |
+|------|---------|
+| `playwright.config.ts` | Playwright configuration (baseURL from `BASE_URL` env var, default `http://localhost:8080`) |
+| `e2e/login.spec.ts` | 5 E2E test cases |
+| `Dockerfile.playwright` | Docker image for running tests in containers (based on `mcr.microsoft.com/playwright`) |
+| `k8s/playwright-job.yaml` | K8s Job manifest to run tests on GKE |
+
+### 7.3 Test cases
+
+| # | Test | What it verifies |
+|---|------|-----------------|
+| 1 | **Login form display** | All fields (identifiant, mot de passe, langue) and submit button are visible |
+| 2 | **Login success** | Valid credentials (`TNEEIN01`/`4YOU`) → redirect to `/dashboard`, user info displayed |
+| 3 | **Login failure** | Invalid credentials → error toast "Erreur de connexion" appears |
+| 4 | **Dashboard protection** | Accessing `/dashboard` without auth shows no protected content |
+| 5 | **Logout** | After login, clicking logout returns to login page |
+
+### 7.4 Run tests locally
+
+```bash
+# Start the app locally (after building)
+npm run build
+npx vite preview --port 8080 &
+
+# Run Playwright tests
+npm run test:e2e
+
+# Or with UI mode for debugging
+npm run test:e2e:ui
+```
+
+### 7.5 Available npm scripts
+
+```json
+{
+  "test:e2e": "playwright test",
+  "test:e2e:ui": "playwright test --ui",
+  "test:e2e:ci": "playwright test --project=chromium --reporter=junit"
+}
+```
+
+### 7.6 Playwright Docker image
+
+The `Dockerfile.playwright` builds a container that runs tests against any target URL:
+
+```bash
+# Build the Playwright test image
+docker build -f Dockerfile.playwright -t playwright-tests .
+
+# Run tests against a local app
+docker run --rm --network=host -e BASE_URL=http://localhost:8080 playwright-tests
+
+# Run tests against GKE service (from within the cluster)
+docker run --rm -e BASE_URL=http://login-page-service.sopra-hr.svc.cluster.local playwright-tests
+```
+
+### 7.7 K8s Job for GKE execution
+
+The `k8s/playwright-job.yaml` defines a Kubernetes Job that runs inside the cluster, targeting the app via its internal service DNS:
+
+```yaml
+# Key configuration:
+env:
+  - name: BASE_URL
+    value: "http://login-page-service.sopra-hr.svc.cluster.local"
+```
+
+Run manually on GKE:
+```bash
+kubectl apply -f k8s/playwright-job.yaml
+kubectl wait --for=condition=complete job/playwright-e2e-tests -n sopra-hr --timeout=300s
+kubectl logs job/playwright-e2e-tests -n sopra-hr
+```
+
+### 7.8 CI/CD integration
+
+The pipeline adds two stages after the image push:
+
+| Stage | Job Name | What it does |
+|-------|----------|--------------|
+| 5B | 🎭 **Build Playwright Image** | Builds and pushes `playwright-tests` image to Artifact Registry |
+| 5C | 🎭 **Playwright E2E Tests** | Runs tests as a K8s Job on GKE after ArgoCD sync confirms healthy deployment |
+
+The E2E tests act as a **gate before OWASP ZAP** — if tests fail, ZAP scan won't run.
+
+---
+
+## 8. Phase 7 — Install Prometheus & Grafana (Optional)
+
+### 8.1 Add Helm repo and install
 
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -274,7 +375,7 @@ helm upgrade --install kube-prom prometheus-community/kube-prometheus-stack \
   --wait --timeout 10m
 ```
 
-### 7.2 Access Grafana
+### 8.2 Access Grafana
 
 ```bash
 kubectl port-forward svc/kube-prom-grafana -n observability 3000:80 &
@@ -285,11 +386,11 @@ echo "Password: DevOps2025!"
 
 ---
 
-## 8. Phase 7 — Configure GitHub Actions CI/CD
+## 9. Phase 8 — Configure GitHub Actions CI/CD
 
 The pipeline uses **Workload Identity Federation (WIF)** for keyless authentication — no service account key files needed.
 
-### 8.1 Get the secret values from Terraform
+### 9.1 Get the secret values from Terraform
 
 ```bash
 cd terraform
@@ -303,7 +404,7 @@ WIF_PROVIDER = projects/770541080410/locations/global/workloadIdentityPools/gith
 WIF_SERVICE_ACCOUNT = github-actions-sa@maram-pfe-495314.iam.gserviceaccount.com
 ```
 
-### 8.2 Set GitHub repository secrets
+### 9.2 Set GitHub repository secrets
 
 Go to: `https://github.com/MaramRezgui1/PFE_project/settings/secrets/actions`
 
@@ -316,7 +417,7 @@ Click **"New repository secret"** for each:
 
 > ✅ Only **2 secrets** needed. No JSON key files.
 
-### 8.3 Pipeline stages (`.github/workflows/deploy.yml`)
+### 9.3 Pipeline stages (`.github/workflows/deploy.yml`)
 
 The workflow triggers on push to `main` (except changes to `terraform/k8s-deployment.yaml` to avoid loops):
 
@@ -325,37 +426,43 @@ The workflow triggers on push to `main` (except changes to `terraform/k8s-deploy
 | 1 | 🔨 **Build** | Builds Docker image, saves as artifact |
 | 2 | 🔍 **Trivy Scan** | Scans image for CVEs (CRITICAL/HIGH). Uploads SARIF to GitHub Security + HTML report |
 | 3 | 📦 **Push** | Pushes image to Artifact Registry (only if Trivy passes) |
+| 3B | ☁️ **Cloud Run Deploy** | Deploys to Cloud Run (managed serverless) |
 | 4 | ✏️ **Update Manifest** | Updates image tag in `terraform/k8s-deployment.yaml` and pushes commit |
 | 5 | 🔄 **ArgoCD Sync** | Triggers Argo CD sync and waits for healthy deployment |
+| 5B | 🎭 **Build Playwright Image** | Builds and pushes Playwright test Docker image to Artifact Registry |
+| 5C | 🎭 **Playwright E2E Tests** | Runs E2E tests as K8s Job on GKE (gate before ZAP) |
 | 6 | 🛡️ **OWASP ZAP** | Runs DAST scan against the live app via port-forward |
 
-### 8.4 How it works (GitOps flow)
+### 9.4 How it works (GitOps flow)
 
 ```
 Developer pushes code to `main`
         │
         ▼
-┌──────────────────────────────┐
-│  GitHub Actions CI            │
-│                              │
-│  1. Build Docker image        │
-│  2. Trivy scan (block if CVE) │
-│  3. Push to Artifact Registry │
-│  4. Update k8s-deployment.yaml│
-│  5. Trigger ArgoCD sync       │
-│  6. OWASP ZAP DAST scan      │
-└──────────┬───────────────────┘
+┌──────────────────────────────────┐
+│  GitHub Actions CI                │
+│                                  │
+│  1. Build Docker image            │
+│  2. Trivy scan (block if CVE)    │
+│  3. Push to Artifact Registry     │
+│  3B. Deploy to Cloud Run          │
+│  4. Update k8s-deployment.yaml    │
+│  5. Trigger ArgoCD sync           │
+│  5B. Build Playwright test image  │
+│  5C. Run Playwright E2E tests     │
+│  6. OWASP ZAP DAST scan          │
+└──────────┬───────────────────────┘
            │
            ▼
-┌──────────────────────────────┐
-│  Argo CD (in-cluster)         │
-│  - Detects manifest change    │
-│  - Syncs new image to GKE     │
-│  - Rolls out new pods         │
-└──────────────────────────────┘
+┌──────────────────────────────────┐
+│  Argo CD (in-cluster)             │
+│  - Detects manifest change        │
+│  - Syncs new image to GKE         │
+│  - Rolls out new pods             │
+└──────────────────────────────────┘
 ```
 
-### 8.5 Required files in your repo
+### 9.5 Required files in your repo
 
 | File | Purpose |
 |------|---------|
@@ -364,8 +471,12 @@ Developer pushes code to `main`
 | `terraform/k8s-deployment.yaml` | K8s manifest (updated by pipeline) |
 | `argocd/application.yaml` | Argo CD Application CR |
 | `Dockerfile` | Multi-stage build (Node → Nginx) |
+| `Dockerfile.playwright` | Playwright test runner image |
+| `playwright.config.ts` | Playwright configuration |
+| `e2e/login.spec.ts` | E2E test cases (5 tests) |
+| `k8s/playwright-job.yaml` | K8s Job for running E2E tests on GKE |
 
-### 8.6 Trigger the pipeline
+### 9.6 Trigger the pipeline
 
 ```bash
 # Make any code change and push
@@ -378,9 +489,9 @@ Then watch: `https://github.com/MaramRezgui1/PFE_project/actions`
 
 ---
 
-## 9. Phase 8 — Validation & Smoke Tests
+## 10. Phase 9 — Validation & Smoke Tests
 
-### 9.1 Application health
+### 10.1 Application health
 
 ```bash
 kubectl get pods -n sopra-hr
@@ -388,14 +499,14 @@ kubectl get svc -n sopra-hr
 kubectl get deployments -n sopra-hr
 ```
 
-### 9.2 Argo CD status
+### 10.2 Argo CD status
 
 ```bash
 kubectl get applications -n argocd
 # Should show: login-page   Synced   Healthy
 ```
 
-### 9.3 Test the app externally
+### 10.3 Test the app externally
 
 ```bash
 EXTERNAL_IP=$(kubectl get svc login-page-service -n sopra-hr -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
@@ -403,21 +514,23 @@ echo "App URL: http://${EXTERNAL_IP}"
 curl -s http://${EXTERNAL_IP} | head -20
 ```
 
-### 9.4 GitHub Actions
+### 10.4 GitHub Actions
 
 Check: `https://github.com/MaramRezgui1/PFE_project/actions`
 
-All 6 stages should complete:
+All stages should complete:
 - ✅ Build
 - ✅ Trivy Scan (check Security tab for results)
 - ✅ Push to AR
+- ✅ Cloud Run Deploy
 - ✅ Update Manifest
 - ✅ ArgoCD Sync
+- ✅ Playwright E2E Tests (check job logs on GKE)
 - ✅ ZAP Scan (check artifacts for HTML report)
 
 ---
 
-## 10. Improvements & Recommendations
+## 11. Improvements & Recommendations
 
 ### Already implemented ✅
 
@@ -429,6 +542,8 @@ All 6 stages should complete:
 | GitOps with Argo CD | ✅ Done |
 | Multi-stage Docker build | ✅ Done |
 | GKE Autopilot (managed nodes) | ✅ Done |
+| Playwright E2E testing (local + GKE) | ✅ Done |
+| Cloud Run deployment | ✅ Done |
 
 ### Remaining improvements
 
@@ -444,7 +559,7 @@ All 6 stages should complete:
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 ### Terraform errors
 
@@ -475,6 +590,16 @@ All 6 stages should complete:
 | `Permission denied on Artifact Registry` | Check `github-actions-sa` has `artifactregistry.writer` role |
 | Trivy fails with CRITICAL CVEs | Fix the vulnerable packages in Dockerfile (update base images or pin versions) |
 | ZAP scan fails | Check `.zap/rules.tsv` for false positive rules; ensure app is reachable via port-forward |
+
+### Playwright E2E errors
+
+| Error | Solution |
+|-------|----------|
+| `npx playwright test` fails locally | Ensure app is running on `http://localhost:8080` (run `npm run build && npx vite preview --port 8080`) |
+| `Browser not found` | Run `npx playwright install --with-deps chromium` |
+| K8s Job `ImagePullBackOff` | Ensure `playwright-tests` image was pushed to Artifact Registry |
+| K8s Job timeout | Check pod logs: `kubectl logs job/playwright-e2e-tests -n sopra-hr`; verify service DNS is reachable |
+| Tests pass locally but fail on GKE | Ensure `VITE_MOCK_USERS` env var was baked into the app image at build time |
 
 ---
 
@@ -544,7 +669,14 @@ helm upgrade --install kube-prom prometheus-community/kube-prometheus-stack \
 # Go to: https://github.com/MaramRezgui1/PFE_project/settings/secrets/actions
 # Add WIF_PROVIDER and WIF_SERVICE_ACCOUNT from terraform outputs above
 
-# ── 9. Trigger pipeline ──
+# ── 9. Playwright E2E Tests (local validation) ──
+npm install -D @playwright/test
+npx playwright install --with-deps chromium
+npm run build
+npx vite preview --port 8080 &
+npm run test:e2e
+
+# ── 10. Trigger pipeline ──
 git add .
 git commit -m "feat: trigger CI/CD"
 git push origin main
@@ -565,13 +697,16 @@ git push origin main
 │  │  │  GKE Autopilot: maram-cluster-terraform             │  │  │
 │  │  │  Region: europe-west9                               │  │  │
 │  │  │                                                     │  │  │
-│  │  │  ┌───────────────┐  ┌─────────────┐                │  │  │
-│  │  │  │  sopra-hr ns  │  │  argocd ns  │                │  │  │
-│  │  │  │               │  │             │                │  │  │
-│  │  │  │  login-page   │  │  Argo CD    │                │  │  │
-│  │  │  │  (Deployment) │  │  Server     │                │  │  │
-│  │  │  │  nginx:8080   │  │             │                │  │  │
-│  │  │  └───────┬───────┘  └─────────────┘                │  │  │
+│  │  │  ┌───────────────┐  ┌─────────────┐  ┌──────────┐  │  │  │
+│  │  │  │  sopra-hr ns  │  │  argocd ns  │  │observab. │  │  │  │
+│  │  │  │               │  │             │  │namespace │  │  │  │
+│  │  │  │  login-page   │  │  Argo CD    │  │Prometheus│  │  │  │
+│  │  │  │  (Deployment) │  │  Server     │  │ Grafana  │  │  │  │
+│  │  │  │  nginx:8080   │  │             │  │          │  │  │  │
+│  │  │  │               │  └─────────────┘  └──────────┘  │  │  │
+│  │  │  │  playwright   │                                  │  │  │
+│  │  │  │  (K8s Job)    │                                  │  │  │
+│  │  │  └───────┬───────┘                                  │  │  │
 │  │  │          │                                          │  │  │
 │  │  └──────────┼──────────────────────────────────────────┘  │  │
 │  │             ▼                                             │  │
@@ -583,25 +718,46 @@ git push origin main
 │  │  ┌──────────────────┐    ┌─────────────────────────────┐ │  │
 │  │  │ Artifact Registry │    │  WIF Pool: github-actions   │ │  │
 │  │  │ sopra-repo        │    │  Provider: github-provider  │ │  │
-│  │  └──────────────────┘    └─────────────────────────────┘ │  │
+│  │  │  - login-page     │    └─────────────────────────────┘ │  │
+│  │  │  - playwright-tests│                                   │  │
+│  │  └──────────────────┘                                    │  │
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 
          ▲                         ▲
          │ WIF (keyless OIDC)      │ GitOps (auto-sync)
          │                         │
-┌────────┴────────────────────┐    ┌───────┴───────┐
-│  GitHub Actions              │    │   Argo CD     │
-│                              │    │  (in-cluster) │
-│  1. Build image              │    │               │
-│  2. Trivy scan (CVE check)  │    │  Watches Git  │
-│  3. Push to AR               │───►│  Auto-syncs   │
-│  4. Update k8s manifest      │    │  k8s manifest │
-│  5. ArgoCD sync              │    │               │
-│  6. ZAP DAST scan            │    └───────────────┘
-└─────────────────────────────┘
+┌────────┴─────────────────────────┐    ┌───────┴───────┐
+│  GitHub Actions                   │    │   Argo CD     │
+│                                   │    │  (in-cluster) │
+│  1. Build image                   │    │               │
+│  2. Trivy scan (CVE check)       │    │  Watches Git  │
+│  3. Push to AR                    │───►│  Auto-syncs   │
+│  4. Deploy to Cloud Run           │    │  k8s manifest │
+│  5. Update k8s manifest           │    │               │
+│  6. ArgoCD sync                   │    └───────────────┘
+│  7. Build Playwright test image   │
+│  8. Run Playwright E2E on GKE    │
+│  9. OWASP ZAP DAST scan          │
+└───────────────────────────────────┘
 ```
 
 ---
 
 *Generated for the `login-page-replicator` DevSecOps PFE project — Maram Rezgui.*
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
