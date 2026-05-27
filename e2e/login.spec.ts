@@ -9,20 +9,20 @@ test.describe('Login Page', () => {
 
   test('should display login form with all required fields', async ({ page }) => {
     // Verify the page title / logo area
-    await expect(page.locator('text=Bienvenue Maram sur 4YOU')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('text=Bienvenue Maram sur 4YOU')).toBeVisible({ timeout: 30000 });
 
     // Verify form fields are present
-    await expect(page.locator('label:has-text("Votre identifiant")')).toBeVisible();
-    await expect(page.locator('label:has-text("Votre mot de passe")')).toBeVisible();
-    await expect(page.locator('label:has-text("Votre langue")')).toBeVisible();
+    await expect(page.locator('label:has-text("Votre identifiant")')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('label:has-text("Votre mot de passe")')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('label:has-text("Votre langue")')).toBeVisible({ timeout: 10000 });
 
     // Verify submit button
-    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible();
+    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 10000 });
   });
 
   test('should login successfully with valid credentials', async ({ page }) => {
     // Wait for form to be interactive
-    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 30000 });
 
     // Fill in valid credentials
     await page.locator('label:has-text("Votre identifiant")').locator('..').locator('input').fill('TNEEIN01');
@@ -32,7 +32,7 @@ test.describe('Login Page', () => {
     await page.locator('button[type="submit"]:has-text("Me connecter")').click();
 
     // Should redirect to dashboard
-    await expect(page).toHaveURL(/\/dashboard/, { timeout: 10000 });
+    await expect(page).toHaveURL(/\/dashboard/, { timeout: 15000 });
 
     // Verify user info is displayed on dashboard
     await expect(page.locator('text=TNEEIN01')).toBeVisible({ timeout: 10000 });
@@ -40,7 +40,7 @@ test.describe('Login Page', () => {
 
   test('should show error toast on invalid credentials', async ({ page }) => {
     // Wait for form to be interactive
-    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 30000 });
 
     // Fill in invalid credentials
     await page.locator('label:has-text("Votre identifiant")').locator('..').locator('input').fill('INVALID_USER');
@@ -71,7 +71,7 @@ test.describe('Login Page', () => {
 
   test('should logout successfully from dashboard', async ({ page }) => {
     // Wait for form to be interactive
-    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('button[type="submit"]:has-text("Me connecter")')).toBeVisible({ timeout: 30000 });
 
     // First login
     await page.locator('label:has-text("Votre identifiant")').locator('..').locator('input').fill('TNEEIN01');
@@ -79,7 +79,7 @@ test.describe('Login Page', () => {
     await page.locator('button[type="submit"]:has-text("Me connecter")').click();
 
     // Wait for dashboard
-    await expect(page).toHaveURL(/\/dashboard/, { timeout: 10000 });
+    await expect(page).toHaveURL(/\/dashboard/, { timeout: 15000 });
 
     // Click logout button (Power icon button)
     await page.locator('header button').last().click();

@@ -9,6 +9,10 @@ RUN npm install
 
 COPY . .
 
+# Ensure VITE_MOCK_USERS is available at build time for Vite to embed in the bundle
+ARG VITE_MOCK_USERS='[{"id":"TNEEIN01","password":"4YOU","name":"TNEEIN01 TEST1","folderCount":9},{"id":"TNEEMA01","password":"4YOU","name":"TNEEMA01 TEST2","folderCount":5}]'
+ENV VITE_MOCK_USERS=$VITE_MOCK_USERS
+
 RUN npm run build
 
 # Stage 2: Serve with Nginx
