@@ -370,7 +370,7 @@ jobs:
       - name: Wait for Playwright job to complete
         run: |
           kubectl wait --for=condition=complete job/playwright-e2e-tests \
-            -n sopra-hr --timeout=300s || true
+            -n sopra-hr --timeout=600s || true
 
       - name: Get Playwright test logs
         if: always()

@@ -10,6 +10,9 @@ FROM mcr.microsoft.com/playwright:v1.52.0-jammy
 
 WORKDIR /tests
 
+# Install curl for health checks
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
 # Copy package files and install dependencies
 COPY package.json package-lock.json* ./
 RUN npm ci --ignore-scripts
@@ -21,9 +24,14 @@ RUN npx playwright install --with-deps chromium
 # Copy test files
 COPY e2e/ ./e2e/
 
+# Copy entrypoint script
+COPY scripts/run-e2e.sh ./run-e2e.sh
+RUN chmod +x ./run-e2e.sh
+
 # Default BASE_URL — overridden at runtime for GKE
 ENV BASE_URL=http://localhost:8080
+ENV CI=true
 
-# Run tests
-CMD ["npx", "playwright", "test", "--project=chromium"]
+# Run tests via entrypoint that waits for the service
+CMD ["./run-e2e.sh"]
 
