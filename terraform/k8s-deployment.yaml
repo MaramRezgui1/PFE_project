@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: login-page
-          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/login-page:46eebede3d061833856bc5a12d39d9d4353ecea0
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/login-page:18323460743b5272a11b5413dd8354a2282f75d4
           ports:
             - containerPort: 8080
           resources:
