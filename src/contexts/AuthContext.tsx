@@ -8,22 +8,18 @@ interface User {
 
 type MockUserEntry = { id: string; password: string; name: string; folderCount: number };
 
-const buildUsersMap = (): Record<string, { password: string; user: User }> => {
-  const raw = import.meta.env.VITE_MOCK_USERS;
-  if (!raw) {
-    console.warn("VITE_MOCK_USERS is not defined. Copy .env.example to .env.local and fill in the values.");
-    return {};
-  }
-  const entries: MockUserEntry[] = JSON.parse(raw);
-  return Object.fromEntries(
-    entries.map(({ id, password, name, folderCount }) => [
-      id.toUpperCase(),
-      { password, user: { id, name, folderCount } },
-    ])
-  );
-};
+// Hardcoded mock users for the login page demo
+const MOCK_USERS_DATA: MockUserEntry[] = [
+  { id: "TNEEIN01", password: "4YOU", name: "TNEEIN01 TEST1", folderCount: 9 },
+  { id: "TNEEMA01", password: "4YOU", name: "TNEEMA01 TEST2", folderCount: 5 },
+];
 
-const USERS = buildUsersMap();
+const USERS: Record<string, { password: string; user: User }> = Object.fromEntries(
+  MOCK_USERS_DATA.map(({ id, password, name, folderCount }) => [
+    id.toUpperCase(),
+    { password, user: { id, name, folderCount } },
+  ])
+);
 
 interface AuthContextType {
   user: User | null;

@@ -34,6 +34,20 @@ else
   echo "⚠️  Service response doesn't contain HTML. Response preview:"
   echo "$RESPONSE" | head -5
 fi
+
+# Check if the JS bundle is loadable
+echo "🔍 Checking if JS assets are accessible..."
+JS_PATH=$(echo "$RESPONSE" | grep -oP 'src="/assets/[^"]+\.js"' | head -1 | sed 's/src="//;s/"//')
+if [ -n "$JS_PATH" ]; then
+  JS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${BASE_URL}${JS_PATH}")
+  if [ "$JS_STATUS" = "200" ]; then
+    echo "✅ Main JS bundle is accessible (HTTP ${JS_STATUS})"
+  else
+    echo "⚠️  JS bundle returned HTTP ${JS_STATUS} — app may not render!"
+  fi
+else
+  echo "⚠️  Could not find JS bundle path in HTML"
+fi
 echo ""
 
 # Run Playwright tests

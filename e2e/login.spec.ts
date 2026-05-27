@@ -9,7 +9,7 @@ test.describe('Login Page', () => {
 
   test('should display login form with all required fields', async ({ page }) => {
     // Verify the page title / logo area
-    await expect(page.locator('text=Bienvenue Maram sur 4YOU')).toBeVisible({ timeout: 30000 });
+    await expect(page.getByText('Bienvenue Maram sur 4YOU')).toBeVisible({ timeout: 30000 });
 
     // Verify form fields are present
     await expect(page.locator('label:has-text("Votre identifiant")')).toBeVisible({ timeout: 10000 });
@@ -86,6 +86,6 @@ test.describe('Login Page', () => {
 
     // Should redirect back to login
     await expect(page).toHaveURL('/', { timeout: 10000 });
-    await expect(page.locator('text=Bienvenue Maram sur 4YOU')).toBeVisible();
+    await expect(page.getByText('Bienvenue Maram sur 4YOU')).toBeVisible();
   });
 });
