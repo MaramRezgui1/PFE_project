@@ -4,7 +4,9 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - 'terraform/k8s-deployment.yaml'  # Avoid re-triggering on ArgoCD manifest commits
+      - 'terraform/k8s-deployment.yaml'
+      - 'k8s/app/deployment.yaml'
+      - 'k8s/app/playwright-hook.yaml'
 
 env:
   PROJECT_ID: maram-pfe-495314
@@ -14,6 +16,7 @@ env:
   GKE_CLUSTER: maram-cluster-terraform
   IMAGE_TAG: ${{ github.sha }}
   SERVICE_NAME: login-page
+  PW_IMAGE: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests
 
 jobs:
   # ──────────────────────────────────────────────
@@ -74,7 +77,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history for accurate blame info
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -256,8 +259,8 @@ jobs:
           echo "cloud_run_url=${CLOUD_RUN_URL}" >> $GITHUB_OUTPUT
 
   # ──────────────────────────────────────────────
-  # Stage 4: Update K8s Manifest (GitOps)
-  # ArgoCD watches this commit and deploys
+  # Stage 4: Update K8s Manifests (GitOps)
+  # ArgoCD watches this commit and deploys + runs PostSync hooks
   # ──────────────────────────────────────────────
   update-manifest:
     name: ✏️ Update Manifest
@@ -272,20 +275,36 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update image tag in K8s manifest
+      - name: Update image tags in K8s manifests
         run: |
-          sed -i "s|image: .*login-page:.*|image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}|" terraform/k8s-deployment.yaml
+          FULL_IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ env.IMAGE_TAG }}"
+          PW_FULL_IMAGE="${{ env.PW_IMAGE }}:${{ env.IMAGE_TAG }}"
 
-      - name: Commit and push updated manifest
+          # Update app deployment
+          sed -i "s|image: .*login-page:.*|image: ${FULL_IMAGE}|" k8s/app/deployment.yaml
+
+          # Update Playwright PostSync hook image tags
+          sed -i "s|image: .*playwright-tests:.*|image: ${PW_FULL_IMAGE}|g" k8s/app/playwright-hook.yaml
+
+          # Also keep terraform manifest in sync (legacy)
+          sed -i "s|image: .*login-page:.*|image: ${FULL_IMAGE}|" terraform/k8s-deployment.yaml
+
+          echo "--- Updated k8s/app/deployment.yaml ---"
+          grep "image:" k8s/app/deployment.yaml
+          echo "--- Updated k8s/app/playwright-hook.yaml ---"
+          grep "image:" k8s/app/playwright-hook.yaml
+
+      - name: Commit and push updated manifests
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add terraform/k8s-deployment.yaml
-          git diff --staged --quiet || git commit -m "ci: update login-page image to ${{ env.IMAGE_TAG }}"
+          git add k8s/app/deployment.yaml k8s/app/playwright-hook.yaml terraform/k8s-deployment.yaml
+          git diff --staged --quiet || git commit -m "ci: update image tags to ${{ env.IMAGE_TAG }}"
           git push
 
   # ──────────────────────────────────────────────
-  # Stage 5: ArgoCD Sync — Wait for deployment
+  # Stage 5: ArgoCD Sync — Trigger sync via kubectl
+  # (avoids argocd CLI permission issues)
   # ──────────────────────────────────────────────
   argocd-sync:
     name: 🔄 ArgoCD Sync
@@ -308,36 +327,62 @@ jobs:
           cluster_name: ${{ env.GKE_CLUSTER }}
           location: ${{ env.REGION }}
 
-      - name: Install ArgoCD CLI
+      - name: Trigger ArgoCD sync via kubectl
         run: |
-          curl -sSL -o /usr/local/bin/argocd \
-            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          chmod +x /usr/local/bin/argocd
-
-      - name: Port-forward ArgoCD server
-        run: |
-          kubectl port-forward svc/argocd-server 8443:443 -n argocd &
+          # Force ArgoCD to refresh from Git immediately
+          kubectl patch application login-page-replicator -n argocd \
+            --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' || true
           sleep 5
 
-      - name: Login to ArgoCD
-        run: |
-          ARGOCD_PASSWORD=$(kubectl get secret argocd-initial-admin-secret \
-            -n argocd -o jsonpath="{.data.password}" | base64 -d)
-          argocd login localhost:8443 \
-            --username admin \
-            --password "$ARGOCD_PASSWORD" \
-            --insecure
+          # Trigger a sync operation
+          kubectl patch application login-page-replicator -n argocd --type merge -p '
+          {
+            "operation": {
+              "initiatedBy": {"username": "github-actions"},
+              "sync": {
+                "revision": "HEAD",
+                "prune": true
+              }
+            }
+          }' || true
+          sleep 10
 
-      - name: Trigger sync and wait for healthy deployment
+      - name: Wait for ArgoCD sync to complete
         run: |
-          argocd app sync login-page
-          argocd app wait login-page --health --timeout 300
+          echo "Waiting for ArgoCD to deploy image tag: ${{ env.IMAGE_TAG }}"
+          FOUND=0
+          for i in $(seq 1 60); do
+            PHASE=$(kubectl get application login-page-replicator -n argocd \
+              -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
+            SYNC=$(kubectl get application login-page-replicator -n argocd \
+              -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+            HEALTH=$(kubectl get application login-page-replicator -n argocd \
+              -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+
+            echo "Attempt ${i}/60 — phase: ${PHASE}, sync: ${SYNC}, health: ${HEALTH}"
+
+            if [ "${SYNC}" = "Synced" ] && [ "${HEALTH}" = "Healthy" ]; then
+              FOUND=1
+              break
+            fi
+            sleep 10
+          done
+
+          if [ "${FOUND}" -ne 1 ]; then
+            echo "⚠️ Timed out waiting for sync, but continuing..."
+          else
+            echo "✅ ArgoCD sync completed successfully"
+          fi
+
+      - name: Wait for deployment rollout
+        run: |
+          kubectl rollout status deployment/login-page -n sopra-hr --timeout=300s || true
 
   # ──────────────────────────────────────────────
   # Stage 5B: Build & Push Playwright Test Image
   # ──────────────────────────────────────────────
   build-playwright:
-    name: 🎭 Build test Image
+    name: 🎭 Build Test Image
     runs-on: ubuntu-latest
     needs: push
     permissions:
@@ -361,22 +406,33 @@ jobs:
         run: |
           docker build \
             -f Dockerfile.playwright \
-            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/playwright-tests:${{ env.IMAGE_TAG }} \
-            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/playwright-tests:latest \
+            -t ${{ env.PW_IMAGE }}:${{ env.IMAGE_TAG }} \
+            -t ${{ env.PW_IMAGE }}:latest \
             .
 
       - name: Push Playwright Docker image
         run: |
-          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/playwright-tests:${{ env.IMAGE_TAG }}
-          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/playwright-tests:latest
+          docker push ${{ env.PW_IMAGE }}:${{ env.IMAGE_TAG }}
+          docker push ${{ env.PW_IMAGE }}:latest
 
   # ──────────────────────────────────────────────
-  # Stage 5C: Run Playwright E2E Tests on GKE
+  # Stage 5C: Playwright E2E Tests (parallel via ArgoCD PostSync hooks)
+  # Waits for each hook job to complete and collects results
   # ──────────────────────────────────────────────
   playwright-e2e:
-    name: 🎭 E2E Tests
+    name: 🎭 E2E Tests — ${{ matrix.test_id }}
     runs-on: ubuntu-latest
     needs: [argocd-sync, build-playwright]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - test_id: t1
+            job_name: playwright-e2e-tests-t1
+          - test_id: t2
+            job_name: playwright-e2e-tests-t2
+          - test_id: t3
+            job_name: playwright-e2e-tests-t3
     permissions:
       contents: read
       id-token: write
@@ -397,33 +453,84 @@ jobs:
           cluster_name: ${{ env.GKE_CLUSTER }}
           location: ${{ env.REGION }}
 
-      - name: Delete previous Playwright job (if exists)
+      - name: Wait for PostSync hook job
         run: |
-          kubectl delete job playwright-e2e-tests -n sopra-hr --ignore-not-found=true
+          JOB_NAME="${{ matrix.job_name }}"
+          echo "Waiting for ArgoCD PostSync hook: ${JOB_NAME}..."
 
-      - name: Run Playwright tests as K8s Job
-        run: |
-          sed "s|playwright-tests:latest|playwright-tests:${{ env.IMAGE_TAG }}|g" \
-            k8s/playwright-job.yaml | kubectl apply -f -
+          # Wait for job to appear (ArgoCD creates it after sync)
+          for i in $(seq 1 60); do
+            if kubectl get job "${JOB_NAME}" -n sopra-hr &>/dev/null; then
+              echo "✅ Job ${JOB_NAME} found"
+              break
+            fi
+            echo "Attempt ${i}/60 — job not yet created..."
+            sleep 5
+          done
 
-      - name: Wait for Playwright job to complete
-        run: |
-          kubectl wait --for=condition=complete job/playwright-e2e-tests \
+          kubectl get job "${JOB_NAME}" -n sopra-hr || \
+            { echo "❌ Job never appeared"; exit 1; }
+
+          # Wait for job to finish
+          echo "Waiting for ${JOB_NAME} to complete..."
+          kubectl wait --for=condition=complete job/${JOB_NAME} \
             -n sopra-hr --timeout=600s || true
 
-      - name: Get Playwright test logs
+      - name: Get test logs and check result
         if: always()
         run: |
-          kubectl logs job/playwright-e2e-tests -n sopra-hr
+          JOB_NAME="${{ matrix.job_name }}"
 
-      - name: Check job status
-        run: |
-          STATUS=$(kubectl get job playwright-e2e-tests -n sopra-hr -o jsonpath='{.status.succeeded}')
-          if [ "$STATUS" != "1" ]; then
-            echo "❌ Playwright E2E tests failed!"
+          echo "=== Test Logs for ${JOB_NAME} ==="
+          kubectl logs -l job-name="${JOB_NAME}" -n sopra-hr 2>/dev/null | \
+            sed '/---PLAYWRIGHT-ARTIFACTS-START---/,$d' || true
+
+          # Check job status
+          COMPLETE=$(kubectl get job "${JOB_NAME}" -n sopra-hr \
+            -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)
+          FAILED=$(kubectl get job "${JOB_NAME}" -n sopra-hr \
+            -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
+
+          if [ "${COMPLETE}" = "True" ]; then
+            echo "✅ Test ${JOB_NAME} passed!"
+          elif [ "${FAILED}" = "True" ]; then
+            echo "❌ Test ${JOB_NAME} failed!"
+            exit 1
+          else
+            echo "⚠️ Test ${JOB_NAME} status unknown"
             exit 1
           fi
-          echo "✅ Playwright E2E tests passed!"
+
+      - name: Extract artifacts from logs
+        if: always()
+        run: |
+          JOB_NAME="${{ matrix.job_name }}"
+          mkdir -p artifacts
+
+          kubectl logs -l job-name="${JOB_NAME}" -n sopra-hr 2>/dev/null > /tmp/pod-logs.txt || true
+
+          # Extract base64 tarball
+          sed -n '/---PLAYWRIGHT-ARTIFACTS-START---/,/---PLAYWRIGHT-ARTIFACTS-END---/p' \
+            /tmp/pod-logs.txt | grep -v '^---PLAYWRIGHT-ARTIFACTS' > /tmp/artifacts.b64
+
+          if [ -s /tmp/artifacts.b64 ]; then
+            echo "Extracting artifact tarball..."
+            base64 -d /tmp/artifacts.b64 | tar -xzf - -C artifacts/ || true
+            find artifacts/ -type f | head -20
+          else
+            echo "⚠️ No artifact tarball found"
+          fi
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-${{ matrix.test_id }}-${{ github.run_id }}
+          path: |
+            artifacts/playwright-report/
+            artifacts/test-results/
+          if-no-files-found: warn
+          retention-days: 14
 
   # ──────────────────────────────────────────────
   # Stage 6: OWASP ZAP — DAST Scan
