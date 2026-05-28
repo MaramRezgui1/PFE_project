@@ -1,10 +1,12 @@
 # ──────────────────────────────────────────────────────────────
 # Dockerfile.playwright
 # Runs Playwright E2E tests against a deployed instance of the app.
+# Supports PW_GREP env var to run a subset of tests (for parallel jobs).
+#
 # Usage:
 #   docker build -f Dockerfile.playwright -t playwright-tests .
 #   docker run --rm -e BASE_URL=http://login-page-service.sopra-hr.svc.cluster.local \
-#     playwright-tests
+#     -e PW_GREP="@t1" playwright-tests
 # ──────────────────────────────────────────────────────────────
 FROM mcr.microsoft.com/playwright:v1.52.0-jammy
 
@@ -29,9 +31,41 @@ COPY scripts/run-e2e.sh ./run-e2e.sh
 RUN chmod +x ./run-e2e.sh
 
 # Default BASE_URL — overridden at runtime for GKE
-ENV BASE_URL=http://localhost:8080
+ENV BASE_URL=http://login-page-service.sopra-hr.svc.cluster.local
 ENV CI=true
+ENV PW_GREP=
 
-# Run tests via entrypoint that waits for the service
-CMD ["./run-e2e.sh"]
+# Run tests: wait for service, execute with optional grep filter,
+# then emit a base64-encoded tarball of all artifacts on stdout
+# so GitHub Actions can extract them from `kubectl logs`.
+CMD ["/bin/bash", "-c", "\
+  echo '🎭 Playwright E2E Test Runner'; \
+  echo 'BASE_URL: '${BASE_URL}; \
+  echo 'PW_GREP: '${PW_GREP}; \
+  echo ''; \
+  echo '⏳ Waiting for service...'; \
+  RETRIES=0; MAX_RETRIES=40; \
+  until curl -sf --max-time 3 \"${BASE_URL}\" > /dev/null 2>&1; do \
+    RETRIES=$((RETRIES + 1)); \
+    if [ \"$RETRIES\" -ge \"$MAX_RETRIES\" ]; then \
+      echo '❌ Service not reachable after 120s'; \
+      exit 1; \
+    fi; \
+    echo \"  Attempt ${RETRIES}/${MAX_RETRIES} - retrying in 3s...\"; \
+    sleep 3; \
+  done; \
+  echo '✅ Service is reachable!'; \
+  echo ''; \
+  EXIT=0; \
+  if [ -n \"$PW_GREP\" ]; then \
+    npx playwright test --project=chromium --grep \"$PW_GREP\" || EXIT=$?; \
+  else \
+    npx playwright test --project=chromium || EXIT=$?; \
+  fi; \
+  echo '---PLAYWRIGHT-ARTIFACTS-START---'; \
+  tar -czf - -C /tests playwright-report test-results 2>/dev/null | base64 -w 0; \
+  echo; \
+  echo '---PLAYWRIGHT-ARTIFACTS-END---'; \
+  exit $EXIT \
+"]
 

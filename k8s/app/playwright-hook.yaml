@@ -1,0 +1,127 @@
+# Playwright E2E Test Jobs — ArgoCD PostSync Hooks
+# Each job runs a single test in parallel after the app is deployed.
+# These are visible in the ArgoCD UI resource tree under the app.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: playwright-e2e-tests-t1
+  namespace: sopra-hr
+  labels:
+    app.kubernetes.io/name: playwright-e2e-tests
+    app.kubernetes.io/part-of: login-page-replicator
+    test-id: t1
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: playwright-tests
+        test-id: t1
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: playwright
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:latest
+          env:
+            - name: BASE_URL
+              value: "http://login-page-service.sopra-hr.svc.cluster.local"
+            - name: CI
+              value: "true"
+            - name: PW_GREP
+              value: "@t1"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: playwright-e2e-tests-t2
+  namespace: sopra-hr
+  labels:
+    app.kubernetes.io/name: playwright-e2e-tests
+    app.kubernetes.io/part-of: login-page-replicator
+    test-id: t2
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: playwright-tests
+        test-id: t2
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: playwright
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:latest
+          env:
+            - name: BASE_URL
+              value: "http://login-page-service.sopra-hr.svc.cluster.local"
+            - name: CI
+              value: "true"
+            - name: PW_GREP
+              value: "@t2"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: playwright-e2e-tests-t3
+  namespace: sopra-hr
+  labels:
+    app.kubernetes.io/name: playwright-e2e-tests
+    app.kubernetes.io/part-of: login-page-replicator
+    test-id: t3
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: playwright-tests
+        test-id: t3
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: playwright
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:latest
+          env:
+            - name: BASE_URL
+              value: "http://login-page-service.sopra-hr.svc.cluster.local"
+            - name: CI
+              value: "true"
+            - name: PW_GREP
+              value: "@t3"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+

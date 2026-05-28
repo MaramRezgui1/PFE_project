@@ -1,0 +1,1123 @@
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: playwright-tests
+  namespace: testing
+  labels:
+    app.kubernetes.io/name: playwright-tests
+    app.kubernetes.io/part-of: login-page-replicator
+spec:
+  backoffLimit: 0
+  # Keep completed jobs around long enough to inspect them from the cluster
+  # and from Argo CD when the optional testing Application is enabled.
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      serviceAccountName: playwright-runner
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ar-pull-secret
+      containers:
+        - name: playwright
+          # IMAGE_TAG is replaced by GitHub Actions before kubectl apply
+          image: europe-west1-docker.pkg.dev/nidhal-pfe/login-page-replicator-repo/playwright-tests:IMAGE_TAG
+          env:
+            - name: BASE_URL
+              value: http://login-page-replicator.app.svc.cluster.local
+            - name: CI
+              value: "true"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: playwright-runner
+  namespace: testing
+  annotations:
+    iam.gke.io/gcp-service-account: gke-app-sa@nidhal-pfe.iam.gserviceaccount.com
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app
+  labels:
+    name: app
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: testing
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    name: observability
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security
+---
+# Annotate the default KSA in `testing` for Workload Identity
+# so Playwright Job pods can pull images from Artifact Registry.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: testing
+  annotations:
+    iam.gke.io/gcp-service-account: gke-app-sa@nidhal-pfe.iam.gserviceaccount.com
+# Use the official Playwright image — includes all browser binaries.
+# We install Bun manually because the project uses bun.lock (not package-lock.json).
+FROM mcr.microsoft.com/playwright:v1.58.2-jammy
+
+# Install Bun (requires unzip, which is not in the base image)
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+WORKDIR /tests
+
+# Copy dependency manifests first for layer caching
+COPY package.json bun.lock ./
+
+# Install deps with frozen lockfile (reproducible)
+RUN bun install --frozen-lockfile
+
+# Copy test files
+COPY playwright.config.ts playwright-fixture.ts ./
+COPY tests/ ./tests/
+
+# BASE_URL is overridden at runtime by the k8s Job env var
+ENV BASE_URL=http://login-page-replicator.app.svc.cluster.local
+ENV CI=true
+ENV PW_GREP=
+
+# Run tests, then emit a base64-encoded tarball of all artifacts on a clearly-marked
+# line in stdout so GitHub Actions can extract them from `kubectl logs` without
+# needing `kubectl exec` (which is blocked on completed pods).
+CMD ["/bin/bash", "-c", "\
+  EXIT=0; \
+  if [ -n \"$PW_GREP\" ]; then \
+    bun x playwright test --grep \"$PW_GREP\" || EXIT=$?; \
+  else \
+    bun x playwright test || EXIT=$?; \
+  fi; \
+  echo '---PLAYWRIGHT-ARTIFACTS-START---'; \
+  tar -czf - -C /tests playwright-report test-results 2>/dev/null | base64 -w 0; \
+  echo; \
+  echo '---PLAYWRIGHT-ARTIFACTS-END---'; \
+  exit $EXIT \
+"]
+
+import { test, expect, type Page } from '@playwright/test';
+
+async function login(page: Page) {
+    await page.getByPlaceholder('TNEEIN').fill('TNEEIN');
+    await page.getByPlaceholder('••••••••').fill('4YOU');
+    await page.getByRole('button', { name: 'Sign In' }).click();
+    await expect(page.getByText('My Tasks')).toBeVisible();
+}
+
+async function addTodo(page: Page, text: string) {
+    await page.getByPlaceholder('Add a new task...').fill(text);
+    await page.getByPlaceholder('Add a new task...').press('Enter');
+}
+
+test.describe('Todo App', () => {
+    test.beforeEach(async ({ page }) => {
+        await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.evaluate(() => {
+            window.localStorage.clear();
+        });
+        await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 15000 });
+    });
+
+    test('shows an error for invalid credentials @t1', async ({ page }) => {
+        await page.getByPlaceholder('TNEEIN').fill('wrong-user');
+        await page.getByPlaceholder('••••••••').fill('wrong-pass');
+        await page.getByRole('button', { name: 'Sign In' }).click();
+
+        await expect(page.getByText('does not exist')).toBeVisible();
+        await expect(page.getByText('Welcome back')).toBeVisible();
+    });
+
+    test('logs in successfully and shows the empty state @t2', async ({ page }) => {
+        await login(page);
+
+        await expect(page.getByText('0 pending')).toBeVisible();
+        await expect(page.getByText('No tasks found. Rest easy.')).toBeVisible();
+    });
+
+    test('allows logging out back to the login form @t3', async ({ page }) => {
+        await login(page);
+
+        await page.getByRole('button', { name: 'Logout' }).click();
+
+        await expect(page.getByText('Welcome back')).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Sign In' })).toBeVisible();
+    });
+
+    test('keeps the authenticated session after reload @t4', async ({ page }) => {
+        await login(page);
+
+        await page.reload({ waitUntil: 'domcontentloaded' });
+
+        await expect(page.getByText('My Tasks')).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Logout' })).toBeVisible();
+    });
+
+    test('keeps todos after reload @t5', async ({ page }) => {
+        await login(page);
+
+        const todoText = `Persistent Todo ${Date.now()}`;
+        await addTodo(page, todoText);
+
+        await expect(page.getByText(todoText)).toBeVisible();
+        await expect(page.getByText('1 pending')).toBeVisible();
+
+        await page.reload({ waitUntil: 'domcontentloaded' });
+
+        await expect(page.getByText(todoText)).toBeVisible();
+        await expect(page.getByText('1 pending')).toBeVisible();
+    });
+
+    test('adds, completes, and deletes a todo @t6', async ({ page }) => {
+        await login(page);
+
+        const todoText = `Test Todo ${Date.now()}`;
+        await addTodo(page, todoText);
+
+        const todoItem = page.getByText(todoText);
+        await expect(todoItem).toBeVisible();
+        await expect(page.getByText('1 pending')).toBeVisible();
+
+        const todoRow = page.locator('.group', { has: page.getByText(todoText) });
+        await todoRow.locator('button').first().click();
+
+        const todoTextSpan = todoRow.locator('span', { hasText: todoText });
+        await expect(todoTextSpan).toHaveClass(/line-through/);
+        await expect(page.getByText('0 pending')).toBeVisible();
+
+        await todoRow.hover();
+        await todoRow.locator('button').nth(1).click();
+
+        await expect(todoItem).not.toBeVisible();
+        await expect(page.getByText('No tasks found. Rest easy.')).toBeVisible();
+    });
+});
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './tests',
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  outputDir: 'test-results',
+  reporter: process.env.CI
+    ? [
+        ['line'],
+        ['html', { outputFolder: 'playwright-report', open: 'never' }],
+        ['junit', { outputFile: 'test-results/junit.xml' }],
+        ['json', { outputFile: 'test-results/results.json' }],
+      ]
+    : [['html', { outputFolder: 'playwright-report', open: 'never' }]],
+  use: {
+    // In CI (Kubernetes Job), BASE_URL points to the ClusterIP service.
+    // Locally, falls back to the vite dev server.
+    baseURL: process.env.BASE_URL || 'http://localhost:8080',
+    trace: 'on-first-retry',
+  },
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
+  // Spin up the dev server when the target is localhost (local dev OR GitHub Actions runner).
+  // Skip it when pointing at a real cluster service (BASE_URL set to a non-localhost address).
+  webServer: process.env.BASE_URL && !process.env.BASE_URL.includes('localhost')
+    ? undefined
+    : {
+        command: 'bun run dev',
+        url: 'http://localhost:8080',
+        reuseExistingServer: !process.env.CI,
+        timeout: 120 * 1000,
+      },
+});
+
+// Re-export the base fixture from the package
+// Override or extend test/expect here if needed
+export { test, expect } from "lovable-agent-playwright-config/fixture";
+name: CI (GitHub Actions) + CD (Argo CD) + Playwright Reports
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Run image push + GitOps manifest update (Argo CD deploy)?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+env:
+  PROJECT_ID:   nidhal-pfe
+  REGION:       europe-west1
+  REPO_NAME:    login-page-replicator-repo
+  SERVICE_NAME: login-page-replicator
+  IMAGE_BASE:   europe-west1-docker.pkg.dev/nidhal-pfe/login-page-replicator-repo/login-page-replicator
+  PW_IMAGE:     europe-west1-docker.pkg.dev/nidhal-pfe/login-page-replicator-repo/playwright-tests
+  CLUSTER_NAME: devops-cluster
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1 — Build (runs on every push, PR, and manual trigger)
+  # ────────────────────────────────────────────────────────────────────────────
+  build-test:
+    name: 🔨 Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint || true   # non-blocking — remove "|| true" to enforce
+
+      - name: Build (type-check + vite build)
+        run: bun run build
+
+      - name: Build success
+        run: echo "✅ Build completed successfully"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Prepare release infra (APIs + Artifact Registry)
+  # Runs on: push to master, manual dispatch with deploy=true
+  # Skipped on: pull_requests, manual dispatch with deploy=false
+  # ────────────────────────────────────────────────────────────────────────────
+  prepare-release-infra:
+    name: ☁️ Prepare Release Infra
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true')
+
+    permissions:
+      id-token: write      # needed for Workload Identity Federation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Verify secrets are injected ───────────────────────────────────────
+      - name: Verify GCP secrets are set
+        env:
+          WIF: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          SA:  ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          MISSING=0
+          if [ -z "${WIF}" ]; then
+            echo "❌ GCP_WORKLOAD_IDENTITY_PROVIDER is EMPTY or NOT SET"
+            MISSING=1
+          else
+            echo "✅ GCP_WORKLOAD_IDENTITY_PROVIDER is set (length: ${#WIF})"
+          fi
+          if [ -z "${SA}" ]; then
+            echo "❌ GCP_SERVICE_ACCOUNT is EMPTY or NOT SET"
+            MISSING=1
+          else
+            echo "✅ GCP_SERVICE_ACCOUNT is set (length: ${#SA})"
+          fi
+          if [ "$MISSING" -eq 1 ]; then
+            echo ""
+            echo "👉 Go to: https://github.com/${{ github.repository }}/settings/secrets/actions"
+            echo "   and add both secrets:"
+            echo "   - GCP_WORKLOAD_IDENTITY_PROVIDER  (from: terraform output workload_identity_provider)"
+            echo "   - GCP_SERVICE_ACCOUNT             (from: terraform output github_actions_sa_email)"
+            exit 1
+          fi
+
+      # ── Authenticate to GCP via Workload Identity Federation ─────────────
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # ── Set up gcloud CLI ─────────────────────────────────────────────────
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Enable required GCP APIs
+        run: |
+          gcloud services enable \
+            artifactregistry.googleapis.com \
+            run.googleapis.com \
+            cloudbuild.googleapis.com \
+            --quiet
+
+      - name: Ensure Artifact Registry repository exists
+        run: |
+          if ! gcloud artifacts repositories describe "${{ env.REPO_NAME }}" \
+              --location="${{ env.REGION }}" --quiet 2>/dev/null; then
+            echo "Repository not found. Creating ${REPO_NAME}..."
+            gcloud artifacts repositories create "${{ env.REPO_NAME }}" \
+              --repository-format=docker \
+              --location="${{ env.REGION }}" \
+              --description="Docker images for ${{ env.SERVICE_NAME }}"
+          else
+            echo "Repository ${REPO_NAME} already exists."
+          fi
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3A — App branch: build/push app image to Artifact Registry
+  # ────────────────────────────────────────────────────────────────────────────
+  app-image-release:
+    name: 🚀 App Image -> Artifact Registry
+    runs-on: ubuntu-latest
+    needs: prepare-release-infra
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # ── Configure Docker to push to Artifact Registry ─────────────────────
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # ── Build + push app Docker image ─────────────────────────────────────
+      - name: Build app Docker image
+        run: |
+          docker build \
+            --cache-from ${{ env.IMAGE_BASE }}:latest \
+            -t ${{ env.IMAGE_BASE }}:${{ steps.sha.outputs.short_sha }} \
+            -t ${{ env.IMAGE_BASE }}:latest \
+            .
+
+      - name: Push app image to Artifact Registry
+        run: |
+          docker push ${{ env.IMAGE_BASE }}:${{ steps.sha.outputs.short_sha }}
+          docker push ${{ env.IMAGE_BASE }}:latest
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3D — Trivy image scan (app image)
+  # Runs after the app image is pushed so Trivy can pull it from Artifact Registry.
+  # Blocks the deploy pipeline on CRITICAL vulnerabilities.
+  # ────────────────────────────────────────────────────────────────────────────
+  trivy-image-app:
+    name: 🔒 Trivy Image Scan (app)
+    runs-on: ubuntu-latest
+    needs: app-image-release
+    permissions:
+      id-token: write
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth (so Trivy can pull from Artifact Registry)
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # ── Download the official HTML template ───────────────────────────────
+      - name: Download Trivy HTML template
+        run: |
+          mkdir -p .trivy-templates
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+            -o .trivy-templates/html.tpl
+
+      # ── HTML report (generated first so it always exists for upload) ──────
+      - name: Trivy image scan (HTML report)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_BASE }}:${{ steps.sha.outputs.short_sha }}
+          scanners: vuln,secret
+          format: template
+          template: "@.trivy-templates/html.tpl"
+          output: trivy-app-image-report.html
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          trivyignores: .trivyignore
+
+      # ── SARIF → GitHub Security tab ───────────────────────────────────────
+      - name: Trivy image scan (SARIF)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_BASE }}:${{ steps.sha.outputs.short_sha }}
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-app-image.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          trivyignores: .trivyignore
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-app-image.sarif
+          category: trivy-app-image
+
+      # ── Upload HTML + SARIF as artifact ───────────────────────────────────
+      - name: Upload Trivy app image reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-app-image-report-${{ github.run_id }}
+          path: |
+            trivy-app-image-report.html
+            trivy-app-image.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ── Table summary (informational — does not block for demo) ──────────
+      - name: Trivy image scan (table summary — non-blocking)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_BASE }}:${{ steps.sha.outputs.short_sha }}
+          scanners: vuln,secret
+          format: table
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          trivyignores: .trivyignore
+          exit-code: "0"
+
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3E — Trivy image scan (Playwright test image)
+  # ────────────────────────────────────────────────────────────────────────────
+  trivy-image-playwright:
+    name: 🔒 Trivy Image Scan (playwright)
+    runs-on: ubuntu-latest
+    needs: playwright-release
+    permissions:
+      id-token: write
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # ── Download the official HTML template ───────────────────────────────
+      - name: Download Trivy HTML template
+        run: |
+          mkdir -p .trivy-templates
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+            -o .trivy-templates/html.tpl
+
+      # ── HTML report (generated first so it always exists for upload) ──────
+      - name: Trivy image scan (HTML report)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.PW_IMAGE }}:${{ steps.sha.outputs.short_sha }}
+          scanners: vuln,secret
+          format: template
+          template: "@.trivy-templates/html.tpl"
+          output: trivy-pw-image-report.html
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          trivyignores: .trivyignore
+
+      # ── SARIF → GitHub Security tab ───────────────────────────────────────
+      - name: Trivy image scan (SARIF)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.PW_IMAGE }}:${{ steps.sha.outputs.short_sha }}
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-pw-image.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          trivyignores: .trivyignore
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-pw-image.sarif
+          category: trivy-playwright-image
+
+      # ── Upload HTML + SARIF as artifact ───────────────────────────────────
+      - name: Upload Trivy playwright image reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-pw-image-report-${{ github.run_id }}
+          path: |
+            trivy-pw-image-report.html
+            trivy-pw-image.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ── Table summary (informational — does not block) ────────────────────
+      - name: Trivy image scan (table — informational only)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.PW_IMAGE }}:${{ steps.sha.outputs.short_sha }}
+          scanners: vuln,secret
+          format: table
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          trivyignores: .trivyignore
+          exit-code: "0"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3C — Deploy to Cloud Run (separate graph node)
+  # Now depends on trivy-image-app passing (no CRITICAL CVEs in app image)
+  # ────────────────────────────────────────────────────────────────────────────
+  cloud-run-deploy:
+    name: ☁️ Cloud Run Deploy
+    runs-on: ubuntu-latest
+    needs:
+      - app-image-release
+      - trivy-image-app     # only deploy if image passes the CRITICAL CVE gate
+    outputs:
+      cloud_run_url: ${{ steps.url.outputs.cloud_run_url }}
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy app image to Cloud Run
+        run: |
+          gcloud run deploy "${{ env.SERVICE_NAME }}" \
+            --image="${{ env.IMAGE_BASE }}:${{ steps.sha.outputs.short_sha }}" \
+            --region="${{ env.REGION }}" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=80 \
+            --memory=256Mi \
+            --cpu=1 \
+            --min-instances=0 \
+            --max-instances=10 \
+            --quiet
+
+      - name: Get Cloud Run URL
+        id: url
+        run: |
+          CLOUD_RUN_URL=$(gcloud run services describe "${{ env.SERVICE_NAME }}" \
+            --region="${{ env.REGION }}" \
+            --format='value(status.url)')
+          echo "Cloud Run URL: ${CLOUD_RUN_URL}"
+          echo "cloud_run_url=${CLOUD_RUN_URL}" >> $GITHUB_OUTPUT
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB — OWASP ZAP DAST Baseline Scan (auto-triggered after Cloud Run deploy)
+  # Scans the live Cloud Run URL for missing headers, info leaks, etc.
+  # ────────────────────────────────────────────────────────────────────────────
+  zap-baseline:
+    name: 🔍 OWASP ZAP DAST (Cloud Run)
+    runs-on: ubuntu-latest
+    needs: cloud-run-deploy
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify Cloud Run URL
+        run: |
+          TARGET="${{ needs.cloud-run-deploy.outputs.cloud_run_url }}"
+          if [ -z "${TARGET}" ]; then
+            echo "❌ Cloud Run URL is empty — cannot run ZAP scan."
+            exit 1
+          fi
+          echo "🎯 ZAP target: ${TARGET}"
+
+          # Quick health-check — make sure the app is reachable before scanning
+          echo "Waiting for app to become reachable..."
+          for i in {1..12}; do
+            HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' "${TARGET}" || true)
+            if [ "${HTTP_CODE}" = "200" ]; then
+              echo "✅ App is up (HTTP ${HTTP_CODE})"
+              break
+            fi
+            echo "  Attempt ${i}/12 — HTTP ${HTTP_CODE}"
+            sleep 5
+          done
+
+      - name: Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: ${{ needs.cloud-run-deploy.outputs.cloud_run_url }}
+          rules_file_name: .zap/rules.tsv
+          cmd_options: >-
+            -a
+            -m 10
+            -r zap-report.html
+            -w zap-report.md
+            -J zap-report.json
+            -d
+          fail_action: false
+
+      - name: Upload ZAP report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-dast-${{ github.run_id }}
+          path: |
+            zap-report.html
+            zap-report.md
+            zap-report.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3B — Playwright branch: build/push Playwright test image
+  # ────────────────────────────────────────────────────────────────────────────
+  playwright-release:
+    name: 🎭 Playwright Image -> Artifact Registry
+    runs-on: ubuntu-latest
+    needs: prepare-release-infra
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # ── Build + push Playwright test image ────────────────────────────────
+      - name: Build Playwright Docker image
+        run: |
+          docker build \
+            -f tests/Dockerfile \
+            -t ${{ env.PW_IMAGE }}:${{ steps.sha.outputs.short_sha }} \
+            -t ${{ env.PW_IMAGE }}:latest \
+            .
+
+      - name: Push Playwright image to Artifact Registry
+        run: |
+          docker push ${{ env.PW_IMAGE }}:${{ steps.sha.outputs.short_sha }}
+          docker push ${{ env.PW_IMAGE }}:latest
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4 — Update GitOps manifests after both image branches finish
+  # ────────────────────────────────────────────────────────────────────────────
+  update-k8s-tags:
+    name: 📝 Update K8s Image Tags (GitOps)
+    runs-on: ubuntu-latest
+    needs:
+      - app-image-release
+      - playwright-release
+      - trivy-image-app        # block GitOps push if app image has CRITICAL CVEs
+      - trivy-image-playwright # wait for playwright scan (informational)
+    outputs:
+      short_sha: ${{ steps.sha.outputs.short_sha }}
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: master
+          fetch-depth: 0
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # ── Prepare cluster BEFORE committing to Git ──────────────────────────
+      # The ar-pull-secret and network policies must exist in the app namespace
+      # BEFORE we push the Git commit that triggers Argo CD sync + PostSync hook.
+      # If we do this after the commit, Argo may start the hook pod before the
+      # secret exists, causing ImagePullBackOff.
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.CLUSTER_NAME }}
+          location: ${{ env.REGION }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Pre-create ar-pull-secret and apply network policies
+        run: |
+          kubectl apply -f k8s/namespaces.yaml
+          kubectl apply -f k8s/security/allow-playwright-hook.yaml
+
+          # Refresh image-pull secret in both namespaces so the PostSync hook
+          # pod can pull the Playwright image from Artifact Registry
+          for NS in app testing; do
+            kubectl create secret docker-registry ar-pull-secret \
+              --docker-server=europe-west1-docker.pkg.dev \
+              --docker-username=oauth2accesstoken \
+              --docker-password="$(gcloud auth print-access-token)" \
+              --namespace=${NS} \
+              --dry-run=client -o yaml | kubectl apply -f -
+          done
+
+      # ── Update GitOps manifests — Argo CD picks these up and auto-syncs ───
+      # After the app sync, Argo CD runs playwright-hook.yaml as a PostSync
+      # hook job (visible in the Argo CD UI under login-page-replicator app).
+      - name: Update image tags in k8s manifests
+        run: |
+          SHORT_SHA=${{ steps.sha.outputs.short_sha }}
+
+          # Update app deployment image tag
+          sed -i "s|${{ env.IMAGE_BASE }}:[^ ]*|${{ env.IMAGE_BASE }}:${SHORT_SHA}|g" \
+            k8s/app/deployment.yaml
+
+          # Update Playwright PostSync hook image tag
+          sed -i "s|${{ env.PW_IMAGE }}:[^ ]*|${{ env.PW_IMAGE }}:${SHORT_SHA}|g" \
+            k8s/app/playwright-hook.yaml
+
+          echo "--- Updated deployment.yaml ---"
+          grep "image:" k8s/app/deployment.yaml
+
+          echo "--- Updated playwright-hook.yaml ---"
+          grep "image:" k8s/app/playwright-hook.yaml
+
+      - name: Commit and push updated manifests
+        run: |
+          set -e
+          git config user.email "ci@github.com"
+          git config user.name "GitHub Actions"
+          git add k8s/app/deployment.yaml k8s/app/playwright-hook.yaml
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "ci: update image tags to ${{ steps.sha.outputs.short_sha }}"
+          git pull --rebase origin master
+          git push
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 5 — Wait for Argo CD PostSync hook jobs (isolated per test) & collect results
+  #
+  # Argo CD automatically creates one PostSync job per test marker in the app namespace
+  # (playwright-e2e-tests-t1 ... playwright-e2e-tests-t6).
+  # Each matrix run waits for one job, then uploads HTML/JUnit artifacts.
+  #
+  # ✅ You can also see the job pass/fail directly in the Argo CD UI under
+  #    the "login-page-replicator" application resource tree.
+  # ────────────────────────────────────────────────────────────────────────────
+  e2e-tests:
+    name: 🎭 Playwright e2e (GKE via Argo CD hook) — ${{ matrix.test_id }}
+    runs-on: ubuntu-latest
+    needs: update-k8s-tags
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - test_id: t1
+            job_name: playwright-e2e-tests-t1
+          - test_id: t2
+            job_name: playwright-e2e-tests-t2
+          - test_id: t3
+            job_name: playwright-e2e-tests-t3
+          - test_id: t4
+            job_name: playwright-e2e-tests-t4
+          - test_id: t5
+            job_name: playwright-e2e-tests-t5
+          - test_id: t6
+            job_name: playwright-e2e-tests-t6
+
+    permissions:
+      contents: read
+      id-token: write      # needed for Workload Identity Federation
+      checks: write        # publish JUnit summary as a GitHub check
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Authenticate to GCP ───────────────────────────────────────────────
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # ── Get GKE credentials ───────────────────────────────────────────────
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: devops-cluster
+          location: ${{ env.REGION }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      # ── Apply cluster prerequisites ───────────────────────────────────────
+      # Note: ar-pull-secret was already created in update-k8s-tags (before the Git
+      # commit) so the PostSync hook pod can pull its image immediately.
+      - name: Apply cluster prerequisites
+        run: |
+          kubectl apply -f k8s/namespaces.yaml
+          kubectl apply -f k8s/testing/serviceaccount.yaml
+          kubectl apply --server-side --force-conflicts -f k8s/security/allow-testing-to-app.yaml
+          kubectl apply --server-side --force-conflicts -f k8s/security/allow-playwright-hook.yaml
+
+      # ── Trigger Argo CD sync (don't wait for 3-min polling interval) ─────
+      - name: Trigger Argo CD sync
+        run: |
+          # Force Argo CD to refresh from Git immediately
+          kubectl patch application login-page-replicator -n argocd \
+            --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' || true
+          sleep 5
+
+          # Terminate any stuck sync operation so a new one can start
+          kubectl patch application login-page-replicator -n argocd \
+            --type json -p '[{"op":"remove","path":"/status/operationState"}]' 2>/dev/null || true
+
+          # Force a sync operation via the operation spec
+          kubectl patch application login-page-replicator -n argocd --type merge -p '
+          {
+            "operation": {
+              "initiatedBy": {"username": "github-actions"},
+              "sync": {
+                "revision": "HEAD",
+                "prune": true
+              }
+            }
+          }' || true
+          sleep 10
+
+      # ── Wait for Argo CD to roll out the new app image ────────────────────
+      - name: Wait for Argo CD rollout
+        run: |
+          SHORT_SHA=${{ needs.update-k8s-tags.outputs.short_sha }}
+          echo "Waiting for Argo CD to deploy image tag: ${SHORT_SHA}"
+          FOUND=0
+          for i in {1..60}; do
+            DEPLOYED=$(kubectl get deployment ${{ env.SERVICE_NAME }} -n app \
+              -o jsonpath='{.spec.template.spec.containers[?(@.name=="app")].image}' 2>/dev/null || true)
+            if echo "${DEPLOYED}" | grep -q ":${SHORT_SHA}$"; then
+              FOUND=1
+              break
+            fi
+            echo "Attempt ${i}/60 — current image: ${DEPLOYED:-<not found>}"
+            sleep 10
+          done
+
+          if [ "${FOUND}" -ne 1 ]; then
+            echo "❌ Timed out — Argo CD did not apply tag ${SHORT_SHA} within 10 minutes."
+            kubectl get deployment ${{ env.SERVICE_NAME }} -n app -o yaml || true
+            exit 1
+          fi
+
+          echo "✅ Argo CD deployed ${SHORT_SHA}. Waiting for rollout to complete..."
+          kubectl rollout status deployment/${{ env.SERVICE_NAME }} -n app --timeout=300s
+          kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
+            endpoints/${{ env.SERVICE_NAME }} -n app --timeout=120s
+
+      # ── Wait for Argo CD PostSync hook job to appear and finish ───────────
+      # Argo CD creates one hook job per test marker; this matrix run waits for
+      # its assigned job only and collects that job's artifacts.
+      - name: Wait for Argo CD PostSync hook job
+        run: |
+          JOB_NAME="${{ matrix.job_name }}"
+          echo "Waiting for Argo CD to create ${JOB_NAME} PostSync hook..."
+          for i in {1..60}; do
+            if kubectl get job "${JOB_NAME}" -n app &>/dev/null; then
+              echo "✅ Job ${JOB_NAME} found in app namespace."
+              break
+            fi
+            echo "Attempt ${i}/60 — job not yet created by Argo CD..."
+            sleep 5
+          done
+
+          kubectl get job "${JOB_NAME}" -n app || \
+            { echo "❌ Job never appeared. Is Argo CD running and syncing?"; exit 1; }
+
+          # Poll until job reaches a terminal state (Complete or Failed)
+          echo "Waiting for ${JOB_NAME} job to finish..."
+          TIMEOUT=600
+          ELAPSED=0
+          JOB_STATUS=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            COMPLETE=$(kubectl get job "${JOB_NAME}" -n app \
+              -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)
+            FAILED=$(kubectl get job "${JOB_NAME}" -n app \
+              -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
+
+            if [ "${COMPLETE}" = "True" ]; then
+              echo "✅ Job completed successfully."
+              break
+            elif [ "${FAILED}" = "True" ]; then
+              echo "❌ Job failed."
+              JOB_STATUS=1
+              break
+            fi
+
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
+          done
+
+          if [ $ELAPSED -ge $TIMEOUT ] && [ "${COMPLETE}" != "True" ]; then
+            echo "⏰ Timed out waiting for job after ${TIMEOUT}s."
+            JOB_STATUS=1
+          fi
+
+          # Fetch pod logs to a file — using a file avoids bash $() stripping
+          # trailing newlines which would corrupt the base64 tarball.
+          echo "=== Fetching pod logs ==="
+          mkdir -p artifacts
+          kubectl logs -l job-name="${JOB_NAME}" -n app \
+            --prefix=false 2>/dev/null > /tmp/pod-logs.txt || true
+
+          # Print readable portion (before the artifact sentinel line)
+          sed '/---PLAYWRIGHT-ARTIFACTS-START---/,$d' /tmp/pod-logs.txt
+
+          # Extract the base64 block between the sentinel markers into its own file
+          sed -n '/---PLAYWRIGHT-ARTIFACTS-START---/,/---PLAYWRIGHT-ARTIFACTS-END---/p' \
+            /tmp/pod-logs.txt \
+            | grep -v '^---PLAYWRIGHT-ARTIFACTS' \
+            > /tmp/artifacts.b64
+
+          if [ -s /tmp/artifacts.b64 ]; then
+            echo "Extracting artifact tarball..."
+            base64 -d /tmp/artifacts.b64 | tar -xzf - -C artifacts/ || true
+            echo "Artifact contents:"
+            find artifacts/ -type f | head -40
+          else
+            echo "⚠️  No artifact tarball found in pod logs."
+          fi
+
+          [ "${JOB_STATUS}" -ne 0 ] && exit 1 || true
+
+      # ── Always upload raw artifact bundle ─────────────────────────────────
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-gke-${{ matrix.test_id }}-${{ github.run_id }}
+          path: |
+            artifacts/playwright-report/
+            artifacts/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ── Publish JUnit check — requires actual test results ────────────────
+      - name: Publish JUnit report
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: artifacts/test-results/junit.xml
+          check_name: Playwright E2E Results (GKE ${{ matrix.test_id }})
+          detailed_summary: true
+          fail_on_failure: true
+          require_tests: true
+
+
+

@@ -1,0 +1,21 @@
+# Network policy to allow Playwright hook pods to reach the app service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-playwright-hook
+  namespace: sopra-hr
+spec:
+  podSelector:
+    matchLabels:
+      app: login-page
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: playwright-tests
+      ports:
+        - protocol: TCP
+          port: 8080
+

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sopra-hr
+  labels:
+    name: sopra-hr
+

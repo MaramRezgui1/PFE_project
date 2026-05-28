@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: login-page
+  namespace: sopra-hr
+  labels:
+    app: login-page
+    app.kubernetes.io/name: login-page
+    app.kubernetes.io/part-of: login-page-replicator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: login-page
+  template:
+    metadata:
+      labels:
+        app: login-page
+    spec:
+      containers:
+        - name: app
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/login-page:latest
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+

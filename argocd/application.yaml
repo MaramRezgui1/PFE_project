@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: login-page
+  name: login-page-replicator
   namespace: argocd
 spec:
   project: default
@@ -9,9 +9,7 @@ spec:
   source:
     repoURL: https://github.com/MaramRezgui1/PFE_project
     targetRevision: main
-    path: terraform
-    directory:
-      include: 'k8s-deployment.yaml'
+    path: k8s/app
 
   destination:
     server: https://kubernetes.default.svc

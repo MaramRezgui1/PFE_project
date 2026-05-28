@@ -1,3 +1,13 @@
+# ⚠️ DEPRECATED — This standalone job is kept for reference only.
+# The Playwright tests are now run as ArgoCD PostSync hooks defined in:
+#   k8s/app/playwright-hook.yaml
+#
+# Each test is tagged (@t1, @t2, @t3) and runs as a separate parallel Job
+# after ArgoCD deploys the app. Jobs are visible in the ArgoCD UI.
+#
+# To run all tests manually (without ArgoCD), use:
+#   kubectl apply -f k8s/app/playwright-hook.yaml
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
