@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/login-page:latest
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/login-page:e1f5958dd6a7bb8f382dce451f1287be9c697381
           ports:
             - containerPort: 8080
           resources:

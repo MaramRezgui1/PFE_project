@@ -27,7 +27,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: playwright
-          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:latest
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:e1f5958dd6a7bb8f382dce451f1287be9c697381
           env:
             - name: BASE_URL
               value: "http://login-page-service.sopra-hr.svc.cluster.local"
@@ -68,7 +68,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: playwright
-          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:latest
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:e1f5958dd6a7bb8f382dce451f1287be9c697381
           env:
             - name: BASE_URL
               value: "http://login-page-service.sopra-hr.svc.cluster.local"
@@ -109,7 +109,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: playwright
-          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:latest
+          image: europe-west9-docker.pkg.dev/maram-pfe-495314/sopra-repo/playwright-tests:e1f5958dd6a7bb8f382dce451f1287be9c697381
           env:
             - name: BASE_URL
               value: "http://login-page-service.sopra-hr.svc.cluster.local"
