@@ -26,9 +26,6 @@ RUN npx playwright install --with-deps chromium
 # Copy test files
 COPY e2e/ ./e2e/
 
-# Copy entrypoint script
-COPY scripts/run-e2e.sh ./run-e2e.sh
-RUN chmod +x ./run-e2e.sh
 
 # Default BASE_URL — overridden at runtime for GKE
 ENV BASE_URL=http://login-page-service.sopra-hr.svc.cluster.local
